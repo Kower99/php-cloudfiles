@@ -129,6 +129,10 @@ class CF_Http
     private $_cdn_log_retention;
     private $_cdn_acl_user_agent;
     private $_cdn_acl_referrer;
+    
+    # Fix for 'open_basedir' && 'safe_mode' 
+    #
+    private $_curl_exec_follow;
 
     function __construct($api_version)
     {
@@ -245,7 +249,7 @@ class CF_Http
             curl_setopt($curl_ch, CURLOPT_CAINFO, $this->cabundle_path);
         }
         curl_setopt($curl_ch, CURLOPT_VERBOSE, $this->dbug);
-        curl_setopt($curl_ch, CURLOPT_FOLLOWLOCATION, 1);
+//        curl_setopt($curl_ch, CURLOPT_FOLLOWLOCATION, 1);
         curl_setopt($curl_ch, CURLOPT_MAXREDIRS, 4);
         curl_setopt($curl_ch, CURLOPT_HEADER, 0);
         curl_setopt($curl_ch, CURLOPT_HTTPHEADER, $headers);
@@ -254,12 +258,58 @@ class CF_Http
         curl_setopt($curl_ch, CURLOPT_HEADERFUNCTION,array(&$this,'_auth_hdr_cb'));
         curl_setopt($curl_ch, CURLOPT_CONNECTTIMEOUT, 10);
         curl_setopt($curl_ch, CURLOPT_URL, $url);
-        curl_exec($curl_ch);
+        $mr = 4;
+        $this->_curl_exec_follow($curl_ch, $mr);
         curl_close($curl_ch);
 
         return array($this->response_status, $this->response_reason,
             $this->storage_url, $this->cdnm_url, $this->auth_token);
     }
+    
+    function _curl_exec_follow(/*resource*/ $ch, /*int*/ &$maxredirect = null) { 
+        $mr = $maxredirect === null ? 5 : intval($maxredirect); 
+        if (ini_get('open_basedir') == '' && ini_get('safe_mode' == 'Off')) { 
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, $mr > 0); 
+            curl_setopt($ch, CURLOPT_MAXREDIRS, $mr); 
+        } else { 
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false); 
+            if ($mr > 0) { 
+                $newurl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL); 
+    
+                $rch = curl_copy_handle($ch); 
+                curl_setopt($rch, CURLOPT_HEADER, true); 
+                curl_setopt($rch, CURLOPT_NOBODY, true); 
+                curl_setopt($rch, CURLOPT_FORBID_REUSE, false); 
+                curl_setopt($rch, CURLOPT_RETURNTRANSFER, true); 
+                do { 
+                    curl_setopt($rch, CURLOPT_URL, $newurl); 
+                    $header = curl_exec($rch); 
+                    if (curl_errno($rch)) { 
+                        $code = 0; 
+                    } else { 
+                        $code = curl_getinfo($rch, CURLINFO_HTTP_CODE); 
+                        if ($code == 301 || $code == 302) { 
+                            preg_match('/Location:(.*?)\n/', $header, $matches); 
+                            $newurl = trim(array_pop($matches)); 
+                        } else { 
+                            $code = 0; 
+                        } 
+                    } 
+                } while ($code && --$mr); 
+                curl_close($rch); 
+                if (!$mr) { 
+                    if ($maxredirect === null) { 
+                        trigger_error('Too many redirects. When following redirects, libcurl hit the maximum amount.', E_USER_WARNING); 
+                    } else { 
+                        $maxredirect = 0; 
+                    } 
+                    return false; 
+                } 
+                curl_setopt($ch, CURLOPT_URL, $newurl); 
+            } 
+        } 
+        return curl_exec($ch);     
+    }    
 
     # (CDN) GET /v1/Account
     #
@@ -1351,7 +1401,7 @@ class CF_Http
             curl_setopt($ch, CURLOPT_CAINFO, $this->cabundle_path);
         }
 	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, True);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+//        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
         curl_setopt($ch, CURLOPT_MAXREDIRS, 4);
         curl_setopt($ch, CURLOPT_HEADER, 0);
@@ -1533,7 +1583,9 @@ class CF_Http
         curl_setopt($this->connections[$conn_type],
             CURLOPT_URL, $url_path);
 
-        if (!curl_exec($this->connections[$conn_type]) && curl_errno($this->connections[$conn_type]) !== 0) {
+        $mr = 4;
+
+        if (!$this->_curl_exec_follow($this->connections[$conn_type], $mr) && curl_errno($this->connections[$conn_type]) !== 0) {
             $this->error_str = "(curl error: "
                 . curl_errno($this->connections[$conn_type]) . ") ";
             $this->error_str .= curl_error($this->connections[$conn_type]);
